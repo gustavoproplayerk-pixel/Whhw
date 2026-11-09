@@ -1,54 +1,48 @@
-name: RDP-Roblox-HighPerf
+name: RDP-Admin-MaxPerf
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp-roblox:
-    runs-on: windows-latest # Usa a máquina mais potente do GitHub (8 vCPU / 32GB RAM)
+  secure-rdp-admin:
+    # Máquina mais potente disponível no GitHub Hosted
+    runs-on: windows-latest
     
     env:
       TS_VERSION: "1.82.0"
       
     steps:
-      - name: Maximize System Performance & Spoof VM Identity
+      - name: Optimize System Performance & Disable Bloat
         run: |
-          # 1. Desativar serviços desnecessários para liberar CPU/RAM
+          # Desativar serviços que consomem recursos desnecessários em background
           Set-Service -Name DiagTrack -StartupType Disabled -Force
           Set-Service -Name WSearch -StartupType Disabled -Force
           Set-Service -Name SysMain -StartupType Disabled -Force
+          Set-Service -Name DoSvc -StartupType Disabled -Force
           
-          # 2. Spoofing de Identidade de Hardware (Crucial para não parecer VM)
-          # Injeta serial de placa-mãe e BIOS genéricas mas consistentes
-          $biosSerial = "To be filled by O.E.M."
-          $mbSerial = "To be filled by O.E.M."
-          
-          Set-ItemProperty -Path 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' -Name 'SystemProductName' -Value "VMware Virtual Platform" -Force
-          # Mas vamos mudar para algo mais "desktop" se detectado via WMI
-          # Para Roblox, o segredo é ter discos e CPU visíveis.
-          
-          # Forçar uso de GPU padrão sem limitações de DRAM virtual
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'SchedulerIntelligent' -Value 0 -Force
-          
-          # Aumentar limite de memória de sistema para apps
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' -Name 'SmartMemoryManagement' -Value 0 -Force
+          # Ajustes de energia para máximo desempenho (High Performance)
+          powercfg -setactive 8a18e092-746b-4d51-bc8b-747b6cd8385c
 
       - name: Configure Core RDP Settings
         run: |
+          # Habilitar RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Permitir login sem NLA (Network Level Authentication) para compatibilidade máxima
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
+          # Liberar porta no Firewall
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create Admin User with Secure Password
         run: |
           Add-Type -AssemblyName System.Security
           $charSet = @{
@@ -67,7 +61,8 @@ jobs:
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -Description "High Perforance User"
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -Description "Full Admin Access"
+              # Adicionar ao grupo Administradores para controle total
               Add-LocalGroupMember -Group "Administrators" -Member "RDP"
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           } else {
@@ -103,41 +98,15 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Install Roblox Player (Silent & Optimized)
+      - name: Final Status Check
         run: |
-          $robloxInstallerUrl = "https://clientcdn.roblox.com/v/client/download/win32"
-          $installerPath = "$env:TEMP\RobloxSetup.exe"
-          
-          Write-Host "Downloading latest Roblox..."
-          Invoke-WebRequest -Uri $robloxInstallerUrl -OutFile $installerPath
-          
-          Write-Host "Installing Roblox silently..."
-          Start-Process -FilePath $installerPath -ArgumentList "/silent" -Wait
-          
-          Remove-Item $installerPath -Force
-          
-          # Verificar instalação
-          if (Test-Path "$env:LOCALAPPDATA\Roblox\Versions") {
-              Write-Host "Roblox installed successfully."
-          } else {
-              Write-Error "Roblox installation verification failed."
-              exit 1
-          }
-
-      - name: Auto-Login and Verify Environment
-        run: |
-          # Configurar login automático para o usuário RDP
-          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-          Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1"
-          Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "RDP"
-          Set-ItemProperty -Path $regPath -Name "DefaultPassword" -Value "${{ env.password }}" # Note: password needs to be exported first or re-entered here if not in env properly
-          
-          # Reboot para aplicar tudo e carregar o Roblox
-          Restart-Computer -Force
-          
-          # Aguardar boot completo
-          Start-Sleep -Seconds 60
-          
-          Write-Host "System Ready for RDP connection on Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "=========================================="
+          Write-Host "SYSTEM READY FOR ADMIN ACCESS"
+          Write-Host "=========================================="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Port: 3389"
           Write-Host "User: RDP"
           Write-Host "Password: $env.RDP_CREDS"
+          Write-Host "Privileges: Full Administrator"
+          Write-Host "Resources: Max (8 vCPU / 32GB RAM)"
+          Write-Host "=========================================="
