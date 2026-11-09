@@ -1,112 +1,134 @@
-name: RDP-Admin-MaxPerf
+name: Windows Cloud PC - AnyDesk Daemon Estável
 
 on:
   workflow_dispatch:
+    inputs:
+      anydesk_id:
+        description: 'AnyDesk ID Fixo (opcional)'
+        required: false
+        default: ''
+
+env:
+  ANYDESK_VERSION: "9.2.5" # Versão estável conhecida por funcionar bem em headless
+  ANYDESK_URL: "https://download.anydesk.com/AnyDesk_9.2.5_Windows.zip"
+  ANYDESK_DIR: "${{ github.workspace }}/anydesk"
+  ANYDESK_EXE: "${{ github.workspace }}/anydesk/AnyDesk.exe"
+  PROCESSOR_COUNT: 8
+  OPENGL: "1"
+  MEMORY_GB: 16
 
 jobs:
-  secure-rdp-admin:
-    # Máquina mais potente disponível no GitHub Hosted
+  build:
+    name: Iniciando Sistema Reforçado
     runs-on: windows-latest
-    
+    timeout-minutes: 10080 # Quase uma semana de uptime
     env:
-      TS_VERSION: "1.82.0"
-      
+      GITHUB_PRESERVE_WORKFLOW: true
+
     steps:
-      - name: Optimize System Performance & Disable Bloat
+      - name: 📥 Baixar AnyDesk Portable
         run: |
-          # Desativar serviços que consomem recursos desnecessários em background
-          Set-Service -Name DiagTrack -StartupType Disabled -Force
-          Set-Service -Name WSearch -StartupType Disabled -Force
-          Set-Service -Name SysMain -StartupType Disabled -Force
-          Set-Service -Name DoSvc -StartupType Disabled -Force
+          Write-Host "Baixando AnyDesk versão ${{ env.ANYDESK_VERSION }}..."
           
-          # Ajustes de energia para máximo desempenho (High Performance)
-          powercfg -setactive 8a18e092-746b-4d51-bc8b-747b6cd8385c
+          # Cria pasta temporária
+          $tempDir = Join-Path $env:TEMP "AnyDesk_Download"
+          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+          
+          # Baixa o ZIP
+          $zipPath = Join-Path $tempDir "AnyDesk.zip"
+          Invoke-WebRequest -Uri "${{ env.ANYDESK_URL }}" -OutFile $zipPath -UseBasicParsing
+          
+          # Extrai
+          Expand-Archive -Path $zipPath -DestinationPath "${{ env.ANYDESK_DIR }}" -Force
+          
+          # Limpa ZIP
+          Remove-Item $zipPath -Force
+          Remove-Item $tempDir -Recurse -Force
+          
+          Write-Host "✅ AnyDesk baixado e extraído."
 
-      - name: Configure Core RDP Settings
+      - name: ⚡ Preparar e Iniciar Daemon
         run: |
-          # Habilitar RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
+          $anydeskExe = "${{ env.ANYDESK_EXE }}"
+          $dir = "${{ env.ANYDESK_DIR }}"
           
-          # Permitir login sem NLA (Network Level Authentication) para compatibilidade máxima
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Liberar porta no Firewall
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service -Name TermService -Force
-
-      - name: Create Admin User with Secure Password
-        run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126))
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -Description "Full Admin Access"
-              # Adicionar ao grupo Administradores para controle total
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          } else {
-              Set-LocalUser -Name "RDP" -Password $securePass
-          }
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-${env:TS_VERSION}-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 15) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+          # 1. Verifica existência
+          if (-not (Test-Path $anydeskExe)) {
+              Write-Error "❌ ERRO: AnyDesk não encontrado em $anydeskExe"
               exit 1
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Final Status Check
+          # 2. Cria estrutura obrigatória para rodar headless
+          New-Item -ItemType Directory -Force -Path "$dir\data" | Out-Null
+          New-Item -ItemType File -Force -Path "$dir\user.conf" | Out-Null
+
+          # 3. Define ID Fixo se fornecido
+          if ("${{ github.event.inputs.anydesk_id }}" -ne "") {
+              Write-Host "Configurando ID Fixo: ${{ github.event.inputs.anydesk_id }}"
+              "id=${{ github.event.inputs.anydesk_id }}" | Out-File -FilePath "$dir\user.conf" -Encoding ascii
+          } else {
+              Write-Host "ID aleatório será gerado automaticamente."
+          }
+
+          # 4. Mata qualquer processo órfão
+          Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+          # 5. Inicia via CMD para evitar bloqueios do PowerShell
+          Start-Process cmd.exe -ArgumentList "/c", "`"$anydeskExe`" --daemon" -WindowStyle Hidden
+
+          Write-Host "Aguardando inicialização completa..."
+          Start-Sleep -Seconds 30
+
+          # 6. Validação crítica
+          $pid = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+          if ($pid) {
+              Write-Host "✅ Daemon iniciado com sucesso (PID: $($pid.Id))"
+          } else {
+              Write-Error "❌ FALHA CRÍTICA: O daemon do AnyDesk morreu imediatamente após iniciar."
+              exit 1
+          }
+
+      - name: 🔄 Monitoramento Contínuo e Reinício Automático
         run: |
-          Write-Host "=========================================="
-          Write-Host "SYSTEM READY FOR ADMIN ACCESS"
-          Write-Host "=========================================="
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Port: 3389"
-          Write-Host "User: RDP"
-          Write-Host "Password: $env.RDP_CREDS"
-          Write-Host "Privileges: Full Administrator"
-          Write-Host "Resources: Max (8 vCPU / 32GB RAM)"
-          Write-Host "=========================================="
+          Write-Host "Iniciando monitoramento contínuo..."
+          while ($true) {
+              $anydesk = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+              
+              if (-not $anydesk -or $anydesk.HasExited) {
+                  Write-Warning "⚠️ AnyDesk detectado como parado. Tentando reiniciar..."
+                  
+                  # Tenta reiniciar
+                  $exepath = "${{ env.ANYDESK_EXE }}"
+                  if (Test-Path $exepath) {
+                      Start-Process cmd.exe -ArgumentList "/c", "`"$exepath`" --daemon" -WindowStyle Hidden
+                      Start-Sleep -Seconds 15 # Espera para ver se estabiliza
+                      
+                      $checkPid = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+                      if ($checkPid) {
+                          Write-Host "✅ Reinício bem-sucedido (PID: $($checkPid.Id))"
+                      } else {
+                          Write-Error "❌ Falha ao reiniciar após detecção de parada."
+                          break
+                      }
+                  } else {
+                      Write-Error "❌ Arquivo AnyDesk perdido durante execução."
+                      break
+                  }
+              }
+              
+              Start-Sleep -Seconds 60
+          }
+
+      - name: 💤 Manter Sistema Ativo (Heartbeat)
+        run: |
+          # Garante que o job não seja considerado "inativo" pelo GitHub
+          Write-Host "Sistema ativo. Aguardando término manual ou timeout de ${{ job.timeout-minutes }} minutos."
+          Start-Sleep -Seconds 604800 
+
+      - name: 🧹 Limpeza Segura
+        if: always()
+        run: |
+          Write-Host "Iniciando limpeza..."
+          Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item "${{ env.ANYDESK_DIR }}" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Limpeza finalizada."
