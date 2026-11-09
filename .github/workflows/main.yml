@@ -1,194 +1,114 @@
-name: RDP-Optimized
+name: RDP
 
 on:
   workflow_dispatch:
-    inputs:
-      description:
-        description: 'Descrição da execução (opcional)'
-        required: false
-        default: 'Manual run'
 
 jobs:
   secure-rdp:
+    # Para máximo desempenho, se você tiver uma máquina self-hosted poderosa, use-a aqui.
+    # Se usar o GitHub Hosted, ele já vem com recursos altos (8 vCPU, 32GB RAM).
     runs-on: windows-latest
-    timeout-minutes: 30 # Reduzido de 1h, geralmente leva menos de 5 min
-    
+    timeout-minutes: 3600
+
     steps:
-      - name: Configure Core RDP Settings (Secure & Fast)
+      - name: Configure Core RDP Settings
         run: |
-          # Desabilita bloqueio total do RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
-          
-          # Autenticação: 2 = NLA (Recomendado/Seguro), 1 = Básico, 0 = Não autenticado
-          # Mudado de 0 para 2 para maior compatibilidade e segurança moderna
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 2 -Force
-          
-          # Camada de Segurança: 0 = Protocolo Remoto (Mais compatível), 1 = NLA, 2 = Híbrido
-          # Deixamos em 0 para máxima compatibilidade com clientes variados, 
-          # mas o UserAuthentication=2 já protege via NLA no handshake.
+                             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Firewall: Limpa regras antigas e cria regra específica para Tailscale
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389 profile=any
+            dir=in action=allow protocol=TCP localport=3389
 
-          # Reinicia o serviço para aplicar mudanças imediatamente
           Restart-Service -Name TermService -Force
-          Start-Sleep -Seconds 5 # Pequena pausa para estabilização
 
       - name: Create RDP User with Secure Password
-        id: create-user
         run: |
-          $ErrorActionPreference = 'Stop'
-          
-          # Gera senha forte: 4 maiúsculas, 4 minúsculas, 4 números, 4 especiais
-          $Upper   = [char[]](65..90)
-          $Lower   = [char[]](97..122)
-          $Number  = [char[]](48..57)
-          $Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
-          
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126))
+          }
           $rawPassword = @()
-          $rawPassword += $Upper | Get-Random -Count 4
-          $rawPassword += $Lower | Get-Random -Count 4
-          $rawPassword += $Number | Get-Random -Count 4
-          $rawPassword += $Special | Get-Random -Count 4
-          # Embaralha aleatoriamente
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
-          
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -Description "RDP Access User"
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
               Add-LocalGroupMember -Group "Administrators" -Member "RDP"
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-              Write-Host "User 'RDP' created."
           } else {
               Set-LocalUser -Name "RDP" -Password $securePass
-              Write-Host "User 'RDP' password updated."
           }
           
-          # Exporta credenciais para o ambiente do GitHub Actions (visível nos logs)
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation/update failed"
+              exit 1
+          }
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale-installer.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
-          # Baixa com retry simples caso haja falha de rede momentânea
-          try {
-              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
-          } catch {
-              Write-Error "Failed to download Tailscale installer: $_"
-              exit 1
-          }
-          
-          # Instala silenciosamente
-          $installProcess = Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart", "/log", "$env:TEMP\tailscale_install.log" -Wait -PassThru
-          
-          if ($installProcess.ExitCode -ne 0) {
-              Write-Error "Tailscale installation failed with exit code $($installProcess.ExitCode)"
-              exit 1
-          }
-          
-          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
-          $tailscaleBin = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          if (-not (Test-Path $tailscaleBin)) {
-              Write-Error "Tailscale executable not found after installation."
-              exit 1
-          }
-
-          # Conecta usando a chave secreta
-          & $tailscale.exe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-${{ github.run_id }}" --reset
-          
-          # Aguarda conexão estabelecida
-          $connected = $false
+          $tsIP = $null
           $retries = 0
-          while (-not $connected -and $retries -lt 15) {
-              $status = & $tailscale.exe status --json 2>$null
-              if ($status -match '"Connected":true') {
-                  $connected = $true
-              } else {
-                  Start-Sleep -Seconds 3
-                  $retries++
-              }
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
           
-          if (-not $connected) {
-              Write-Warning "Could not verify connection status, proceeding to get IP anyway..."
-          }
-
-          # Obtém IP
-          $tsIP = & $tailscale.exe ip -4
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Check logs."
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
-          
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "Tailscale connected. IP: $tsIP"
 
-      - name: Install Roblox Player (Optimized)
+      - name: Verify RDP Accessibility
         run: |
-          $robloxInstallerUrl = "https://www.roblox.com/download/?platform=Windows&version=Win"
-          $robloxExePath = "$env:TEMP\RobloxPlayerLauncher.exe"
-          
-          # O Roblox usa redirecionamentos complexos. Usamos o URL canônico que aponta para o launcher atualizado.
-          # Se o link acima mudar, podemos usar o mirror direto do CDN se necessário, mas este é o oficial.
+          Write-Host "RDP is ready on Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Use credentials from previous step to connect via RDP on port 3389"
+
+      - name: Install Roblox Player
+        run: |
+          $robloxInstallerUrl = "https://www.roblox.com/download/client?os=win&platform=pc"
+          $robloxInstallerPath = "$env:TEMP\RobloxPlayerLauncher.exe"
           
           Write-Host "Downloading Roblox Player..."
-          try {
-              Invoke-WebRequest -Uri $robloxInstallerUrl -OutFile $robloxExePath -UseBasicParsing
-          } catch {
-              Write-Error "Failed to download Roblox: $_"
-              exit 1
-          }
+          Invoke-WebRequest -Uri $robloxInstallerUrl -OutFile $robloxInstallerPath
           
-          Write-Host "Installing Roblox Player silently..."
-          # /silent instala o launcher e o cliente base sem abrir janelas
-          $installProc = Start-Process $robloxExePath -ArgumentList "/silent" -Wait -PassThru
+          Write-Host "Installing Roblox Player..."
+          Start-Process -FilePath $robloxInstallerPath -ArgumentList "/S" -Wait
           
-          if ($installProc.ExitCode -ne 0) {
-              Write-Warning "Roblox installer exited with code $($installProc.ExitCode). It might still be installed due to async nature."
-          }
-          
-          # Verifica se o diretório de instalação existe como confirmação básica
-          $robloxFolder = "${env:LOCALAPPDATA}\Roblox\Versions"
-          if (Test-Path $robloxFolder) {
-              Write-Host "Roblox Player appears to be installed successfully."
-          } else {
-              Write-Warning "Roblox installation folder not found. Installation might have failed or is pending background update."
-          }
-          
-          # Limpeza
-          Remove-Item $robloxExePath -Force -ErrorAction SilentlyContinue
+          Remove-Item $robloxInstallerPath -Force
+          Write-Host "Roblox Player installed successfully."
 
-      - name: Verify Final State
+      - name: Keep Runner Alive (Prevent Shutdown)
         run: |
-          Write-Host "=========================================="
-          Write-Host "RDP Environment Ready!"
-          Write-Host "=========================================="
-          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
-          Write-Host "Port         : 3389"
-          Write-Host "User         : RDP"
-          Write-Host "Password     : $env:RDP_CREDS"
-          Write-Host "=========================================="
-          
-          # Mostra status do serviço RDP
-          $rdpStatus = Get-Service TermService
-          Write-Host "TermService Status: $($rdpStatus.Status)"
-          
-          # Mostra se o Roblox está instalado
-          if (Test-Path "${env:LOCALAPPDATA}\Roblox") {
-              Write-Host "Roblox Directory: Present"
-          } else {
-              Write-Host "Roblox Directory: Missing"
-          }
+          # Este passo mantém o runner ocupado indefinidamente (ou até o timeout de 3600 min)
+          # Isso garante que o RDP continue disponível e o Roblox possa ser aberto manualmente 
+          # ou via scripts adicionais sem que a VM seja desligada.
+          Write-Host "Runner staying alive for up to 3600 minutes..."
+          Start-Sleep -Seconds 216000 # 3600 minutos * 60 segundos
